@@ -1,0 +1,386 @@
+---
+title: "portfolio_optimization"
+author: "Rahul Nair"
+date: "2023-02-23"
+output: word_document
+---
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(quantmod)
+library(GA)
+```
+## Part 1:
+### Stocks
+
+I chose set of 10 stocks for the part 1. These assets have no NA data points and covers a range of industries
+
+```{r}
+myStocks <- c("TSLA", "IBM", "INTC","NVDA","GOOGL","COP","XOM","HPQ","SONY","ORCL")
+
+```
+###Getting the data for the year 2019 to train on
+```{r}
+getSymbols(myStocks, from="2019-01-01",to="2020-01-01")
+```
+###Functions 
+Functions to generate initial population and create the data for the stocks passed to it. I also have a contraints function in place to take of the contraints in this problem since the sum has to be equal to 1, no less and no more than 1. For this I used an the approach where I penalize any sum of the vector of weights which is not equal to one and this penality is used in the fitness function 
+
+```{r}
+genarate_population <- function (pop_size) {
+  for(i in 1:pop_size){
+    wts <- runif(n=length(myStocks))
+    
+    wts <- wts/sum(wts)
+    if(i == 1){
+      pop_mat <- rbind(wts)  
+    }
+    else{
+      pop_mat <- rbind(pop_mat,wts)
+    }
+   
+  }
+  return(pop_mat)
+}
+
+constraint = function(x) {
+  boundary_constr = (sum(x)-1)**2   # "sum x = 1" constraint
+  
+  for (i in 1:length(x)) {
+    boundary_constr = boundary_constr + max(c(0,x[i]-1))**2 + max(c(0,-x[i]))**2     
+  }
+  
+  return (boundary_constr)
+}
+
+create_data <- function(stocks){
+  prices <- lapply(stocks,function(x) {Ad(get(x))})
+  names(prices) <- c(stocks)
+  
+  
+  
+  # Daily returns
+  daily_ret <- lapply(prices,dailyReturn)
+  daily_ret <- do.call(merge,daily_ret)
+  colnames(daily_ret) <- stocks
+  
+  
+  
+  
+  
+  
+  # Annualized returns
+  annual_ret <- lapply(prices,yearlyReturn)
+  annual_ret <- do.call(merge,annual_ret)
+  colnames(annual_ret) <- stocks
+  
+  
+  
+  
+  # Covariance matrix
+  cov_mat <- cov(daily_ret)
+  
+  return(list("prices" = prices, 
+              "daily_ret" = daily_ret, 
+              "annual_ret" = annual_ret, 
+              "cov_mat" =   cov_mat))
+}
+
+```
+###Fitness function
+This is the fitness function which tries to maximise the sharpe ratio. The sharpe ratio is the return/risk ratio which is very popular in the Modern Portfolio Theory.To make the performance time saving, I already used the create_data function to keep the data ready if we are to use the same assets. The penality for handling the constraints deducts some value from the final sharpe ratio in order to indicate that the solution is not optimal for the objective
+```{r}
+obj_opt_func <- function(wts,data,fast){
+  days = 252
+  cov_mat <- data$cov_mat
+  
+  #Risk
+  daily_risk <- t(wts) %*% cov_mat %*% wts 
+  yearly_risk <- ((1 + daily_risk)^days)-1
+  yearly_risk <- sqrt(yearly_risk) 
+  
+  #Return
+  yearly_return <- sum(data$annual_ret * wts)
+
+  #Sharpe ratio
+  sharpe <- yearly_return/yearly_risk
+  
+  
+  
+  if (fast) {
+    return(sharpe-100*constraint(wts))
+    }
+  else {
+    return(list("return" = yearly_return, 
+                "risk" = yearly_risk, 
+                "fitness" = sharpe-100*constraint(wts)))
+  }
+  
+  
+  
+}
+
+```
+###Running GA
+Then we run the GA and the get the optimal weights.It tries to maximise the fitness function with the objective to find optimal weights that balance the return-risk ratio. I ran it with custom mutation and crossover rate but the default params seemed to work better so I decided to go with default params 
+```{r}
+
+optimal_returns = function(stock){
+  data_mat <- create_data(stock)
+  ga_res <- ga(
+    type="real-valued", 
+    fitness = function(x){obj_opt_func(x,data_mat,fast=TRUE)}, 
+    lower = rep(0,length(myStocks)), 
+    upper = rep(1,length(myStocks)),  
+    maxiter = 7000, 
+    run=300, 
+    monitor=TRUE,
+    seed=1,
+    popSize = 300
+  )
+  
+  return(ga_res)
+}
+
+sol = optimal_returns(myStocks)
+print(summary(sol))
+sum(summary(sol)$solution)
+evolved <- c(summary(sol)$solution)
+plot(sol)
+
+```
+###Comparison of different weights
+Here I compare the performance of the evolved weights with random weights and equal weights. As it is clearly visible, the evlved weights from the GA solution performs better compared to the other 2
+```{r}
+
+eq_wts <- c(0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1) 
+rnd_wts <- runif(10)
+rnd_wts <- rnd_wts/sum(rnd_wts)
+
+data_mat <- create_data(myStocks)
+eq_data <- obj_opt_func(eq_wts,data_mat,fast=FALSE)
+rnd_data <- obj_opt_func(rnd_wts,data_mat,fast=FALSE)
+evolved_data <- obj_opt_func(evolved,data_mat,fast=FALSE)
+rnd_data
+eq_data
+evolved_data
+
+```
+###Future unseen data
+Here I compare the performance of evolved, equal and random weights on unseen data i.e. data for the year 2020 and as visible the evolved weights that were obtained by training the GA on 2019 data actually yield a good return-rish ratio, it even gets a better sharpe ratio
+```{r}
+
+getSymbols(myStocks, from="2020-01-01",to="2021-01-01")
+data_mat <- create_data(myStocks)
+eq_future_data <- obj_opt_func(eq_wts,data_mat,fast=FALSE)
+evolved_future_data <- obj_opt_func(evolved,data_mat,fast=FALSE)
+rnd_future_data <- obj_opt_func(rnd_wts,data_mat,fast=FALSE)
+eq_future_data
+evolved_future_data
+rnd_future_data
+
+```
+
+###Maximising risk in the portfolio
+Here I have modified the fitness function to maximise the risk, just to try and see what returns we end up with using the new weights.
+```{r}
+
+getSymbols(myStocks, from="2019-01-01",to="2020-01-01")
+obj_max_risk_func <- function(wts,data,fast){
+  days = 252
+  
+  #Risk
+  daily_risk <- t(wts) %*% data$cov_mat %*% wts 
+  yearly_risk <- ((1 + daily_risk)^days)-1
+  yearly_risk <- sqrt(yearly_risk) 
+  #Return
+  yearly_return <- sum(data$annual_ret * wts)
+  #fitness value
+  fitness <- (yearly_risk-100*constraint(wts)) 
+  
+  if (fast) {
+    return(fitness)
+  }
+  else {
+    return(list("return" = yearly_return, 
+                "risk" = yearly_risk, 
+                "fitness" = fitness))
+  }
+
+}
+
+```
+###Running GA for the max risk
+In this part we run the GA with the modified fitness function to maximise the risk, in turn expecting higher results. Here the GA will maximise the risk and it still has the penality approach in place to handle the constraints. This penalty approach was inspired by the knapsack problem where we penalise the itmes that doesn't satisfy the capacity.
+```{r}
+
+
+max_risk_ga = function(stock){
+  data_mat <- create_data(stock)
+  ga_risk_res <- ga(
+    type="real-valued", 
+    fitness = function(x){obj_max_risk_func(x,data_mat,fast=TRUE)}, 
+    lower = rep(0,length(myStocks)), 
+    upper = rep(1,length(myStocks)),  
+    maxiter = 7000, 
+    run=300, 
+    monitor=TRUE,
+    seed=1,
+    popSize = 300
+  )
+  
+  return(ga_risk_res)
+}
+
+
+```
+###Max risk portfolio performance
+Here I have looked at the returns, risk and the fitness score for the solution vector of weights obtained from the max risk GA above. It clearly shows high returns at the cost of high risk when compared the balanced portfolio weights
+```{r}
+
+risk_sol = max_risk_ga(myStocks)
+print(summary(risk_sol))
+sum(summary(risk_sol)$solution)
+risk_evolved <- c(summary(risk_sol)$solution)
+data_mat <- create_data(myStocks)
+risk_evolved_perf <- obj_max_risk_func(risk_evolved,data_mat,fast=FALSE)
+risk_evolved_perf
+plot(risk_sol)
+
+```
+###Comparison of the performance of high risk portfolio with different weights
+Here I have compared the returns, risk and the fitness of the evolved weights from the max risk portfolio with random and even weights. The GA solution again has the better results when compared to the other 2
+```{r}
+
+data_mat <- create_data(myStocks)
+risk_evolved_perf <- obj_max_risk_func(risk_evolved,data_mat,fast=FALSE)
+risk_eq_data <- obj_opt_func(eq_wts,data_mat,fast=FALSE)
+risk_rnd_data <- obj_opt_func(rnd_wts,data_mat,fast=FALSE)
+risk_evolved_perf
+risk_eq_data
+risk_rnd_data
+
+```
+##Part 2
+###GA for top 10 assets from a pool of 50
+For this I have selected a list of 50 assets with none of them having NA data points. These assets cover various industries and are part of the NASDAQ 100.
+```{r}
+stock_pool <- sort(c("AAPL","MSFT","GOOG","GOOGL","AMZN","TSLA","NVDA","META","ASML","AVGO","PEP",
+                     "COST","AZN","XOM","TMUS","ADBE","NFLX","CMCSA","TXN","QCOM","AMD","HON","AMGN",
+                     "SBUX","PDD","INTU","INTC","GILD","AMAT","ADP","BKNG","ADI","PYPL","MDLZ","HPQ",
+                     "REGN","IBM","VRTX","FISV","LRCX","MU","CSX","SONY","CHTR","ORCL","COP",
+                     "KLAC","SNPS","MAR","MNST"))
+getSymbols(stock_pool, from="2019-01-01",to="2020-01-01")
+
+```
+###Functions
+get_stocks function retrieves a list of 10 the stocks from the pool of 50 assets. In this approach I have used the binary representation with 50 bits. ! representing the selected assets from the sorted list of 50 stocks above.
+
+```{r}
+
+get_stocks <- function(bit_vector, big_list)
+{
+  selected <- c()
+  for (i in 1:length(bit_vector))
+  {
+    if (bit_vector[i]==1) { 
+      
+      selected <- append(selected,big_list[i]) 
+      }
+  }
+  return (selected)
+}
+
+```
+Function below is used to generate initial population for the GA to search for 10 optimal assets from the 50.
+```{r}
+
+random_50bits <- function(x) {
+ 
+  for (r in 1:100) {
+    
+    random_assets <-sample(1:50,10)
+    empty_port <- rep(0,50) #empty vector with just ones
+    chosen<- replace(empty_port,random_assets,1)#replace 10 positions randomly with 1
+    if (r == 1) {
+      initialPop <- rbind(chosen)
+    }
+    else
+    {
+      initialPop <- rbind(initialPop,chosen) #append each row to the matrix
+    }
+  }
+  return(initialPop) #return matrix of population to the GA function
+}
+
+```
+###Fitness function
+This is the fitness function to choose 10 assets from the 50 assets pool. In this function, just like in the first part, it uses an approach to check how the random solution of 10 chosen assets performs in terms of yearly returns. The assets with high yearly returns will increase the score. There is a penalty present if the solution vector doesn't add up to 10. This penalty is deducted from the returns of the profile to indicate the solution not being good for the objective.
+```{r}
+
+bit_port_obj <- function(bit_vector, big_list, in_GA)
+{
+  
+  std_vector <- c(1,1,1,1,1,1,1,1,1,1)
+  #std_vector <- std_vector/sum(std_vector)
+  
+  penalty <- (2 * (sum(bit_vector)-10)^2) 
+  
+  #Get data for the selected stocks  
+  stock_list <- get_stocks(bit_vector, big_list)
+  #print(stock_list)
+  data_mat <- create_data(stock_list)
+  
+  daily_ret <- data_mat$daily_ret
+  yearly_ret <- data_mat$yearly_ret
+  cov_mat <- data_mat$cov_mat
+  
+  
+  
+  #Return
+  yearly_return <- sum(std_vector * yearly_ret)
+  
+  #Performance adjusted by penalty if incorrect number of assets in the portfolio
+  final_fitness <- yearly_ret - penalty
+  
+  if (in_GA) {
+    return(final_fitness)
+    }
+  else {
+    return(list(
+                "yearly_return" = yearly_ret, 
+                
+                "fitness" = final_fitness))
+  }
+}
+
+```
+###GA for asset selection
+Here we run the GA with the fitness function implmented above to find a portfolio with 10 best performing stocks from a list of 50. The GA takes a long time to look for a solution since the computation of all the data takes longer when it comes to retrieving the returns and risk data form a pool of 50 assets
+```{r}
+
+bit_portfolio_GA <- function(big_list, in_GA=TRUE) {
+  GA_sol <- ga(type="binary",
+             nBits = 50,
+             maxiter = 7000,
+             fitness = function(x) {bit_port_obj(x, big_list, in_GA)},
+             popSize = 100,
+             population = random_50bits
+  )
+  
+  return(GA_sol)
+}
+
+```
+
+###Performance
+Here the GA did not converge soon and took a lot of time. I had to stop the max run in order to avoid my pc from crashing. The observations are below
+```{r}
+
+
+#GA_port_sol = bit_portfolio_GA(stock_pool,TRUE)
+#print(summary(GA_port_sol))
+#sum(summary(GA_port_sol)$solution)
+#plot(GA_port_sol)
+
+#bit_port_obj(GA_port_sol@solution, stock_pool, FALSE)
+
+```

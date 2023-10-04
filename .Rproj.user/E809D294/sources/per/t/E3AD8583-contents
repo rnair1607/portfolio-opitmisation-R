@@ -1,0 +1,766 @@
+---
+title: "cs815 2022 Assignment 1"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.show=TRUE, error=FALSE, cache =TRUE)
+```
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(quantmod)
+library(GA)
+```
+
+### Module Lead: Dr. Marc Roper
+### Student: Christian Gutiérrez Hermansen
+
+## Part 1:
+### Assets
+I have selected a set of exchange traded funds (ETFs) that together offer a very comprehensive coverage of asset classes (shares, bonds and commodities) and geographic possibilities (by country/continent and level of development in the case of shares).
+
+This is the list:
+
+#### Stock market
+    VT: whole World  
+    EMXC: Emerging markets without China  
+    VOO: USA (S&P500)  
+    VGK: Europe  
+    MCHI: China  
+    VPL: Developed Asia Pacific  
+
+#### Bonds
+    BND: USD total bond market  
+    PFUIX: ex-US non hedged bonds  
+
+#### Commodities
+    PDBC: commodities basket  
+    GLD: Gold  
+
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE, cache = TRUE}
+my_Assets <- c("VT", "EMXC", "VOO", "VGK", "MCHI", "VPL", "BND", "PFUIX", "PDBC", "GLD")
+```
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE, cache = TRUE}
+getSymbols(my_Assets, from="2018-12-31")
+```
+
+### Function to build price, return and covariance matrices for a list of assets  and a time interval
+```{r}
+#Function to Build price, return and covariance matrices for a list of assets
+#and a time interval
+build_matrices <- function(asset_list, time_string)
+{
+  #time string format: "yyyy-mm-dd/yyyy-mm-dd" includes first day, do not include last day
+  
+  #Create  price matrix for list of assets
+  price_matrix <- lapply(asset_list, function(x) {Ad(get(x))}) #fill it with adjusted close data
+  price_matrix <- do.call(merge, price_matrix) #convert to xts object
+  names(price_matrix) <- c(asset_list) #change names
+  price_matrix <- price_matrix[time_string] #slice price_matrix to desired time frame
+  
+  #Create return matrices for list of assets
+  #daily
+  daily_return_matrix <- lapply(price_matrix, dailyReturn)
+  daily_return_matrix <- do.call(merge, daily_return_matrix)
+  colnames(daily_return_matrix) <- asset_list
+  daily_return_matrix <- daily_return_matrix[-1]
+  
+  #monthly
+  monthly_return_matrix <- lapply(price_matrix, monthlyReturn)
+  monthly_return_matrix <- do.call(merge, monthly_return_matrix)
+  colnames(monthly_return_matrix) <- asset_list
+  monthly_return_matrix <- monthly_return_matrix[-1]
+  
+  #yearly
+  yearly_return_matrix <- lapply(price_matrix, yearlyReturn)
+  yearly_return_matrix <- do.call(merge, yearly_return_matrix)
+  colnames(yearly_return_matrix) <- asset_list
+  yearly_return_matrix <- yearly_return_matrix[-1]
+  
+  #Create Covariance Matrix for list of assets
+  covariance_matrix <- cov(daily_return_matrix )
+  
+  #return all matrices
+  return(list("price_matrix" = price_matrix, 
+              "daily_return_matrix" = daily_return_matrix, 
+              "monthly_return_matrix" = monthly_return_matrix, 
+              "yearly_return_matrix" = yearly_return_matrix, 
+              "covariance_matrix" =   covariance_matrix))
+}
+```
+### Fitness function
+The fitness function is key in order to enable the GA to accomplish its objective.
+This function takes a vector of weights, the corresponding asset list, a time  string and returns the return/risk ratio for that portfolio during the specified time period. *in_GA* parameter permits it to return more complete  information when we call the function outside a GA instance. There is an additional "fast" version that takes the financial data matrix as input instead of recalculating it each time.
+```{r }
+portfolio_eval <- function(w_vector, asset_list, time_string, in_GA=TRUE) 
+{
+  w_vector <- w_vector /sum(w_vector) #normalize portfolio weights
+  
+  #Build data matrices  
+  this_matrices <- build_matrices(asset_list,time_string)
+  
+  price_m <- this_matrices$price_matrix
+  d_ret_m <- this_matrices$daily_return_matrix
+  y_ret_m <- this_matrices$yearly_return_matrix
+  
+  cov_m <- cov(d_ret_m)
+  
+  #Evaluate Portfolio Performance
+  n_days = 252
+  
+  #Risk
+  d_P_risk <- t(w_vector) %*% cov_m %*% w_vector #daily volatility
+  y_P_risk <- ((1 + d_P_risk)^n_days)-1 #annualized volatility
+  y_P_risk <- sqrt(y_P_risk) #annualized standard deviation
+  
+  #Yearly Return
+  y_P_return <- sum(w_vector * y_ret_m)
+  
+  #Return to Risk Ratio
+  return_to_risk <- y_P_return / y_P_risk
+  
+  #If in_GA == TRUE returns adjusted return_to_risk only, 
+  #if FALSE, return Performance details
+  if (in_GA) {return(return_to_risk)}
+  else {
+  return(list("time" = time_string, 
+              "return" = y_P_return, 
+              "risk" = y_P_risk, 
+              "fitness" = return_to_risk))
+  }
+}
+
+fast_portfolio_eval <- function(w_vector, this_matrices, in_GA=TRUE) 
+{
+  #if you are evaluating repeatedly the same assets set, no need to recalculate
+  #matrices every time. This function performs an order of magnitude faster, 
+  #enabling the use bigger populations and greater number of generations.
+  
+  w_vector <- w_vector /sum(w_vector) #normalize portfolio weights
+  
+  price_m <- this_matrices$price_matrix
+  d_ret_m <- this_matrices$daily_return_matrix
+  y_ret_m <- this_matrices$yearly_return_matrix
+  
+  cov_m <- cov(d_ret_m)
+  
+  #Evaluate Portfolio Performance
+  n_days = 252
+  
+  #Risk
+  d_P_risk <- t(w_vector) %*% cov_m %*% w_vector #daily variance
+  y_P_risk <- ((1 + d_P_risk)^n_days)-1 #annualized variance
+  y_P_risk <- sqrt(y_P_risk) #annualized standard deviation
+  
+  #Yearly Return
+  y_P_return <- sum(w_vector * y_ret_m)
+  
+  #Return to Risk Ratio
+  return_to_risk <- y_P_return / y_P_risk
+  
+  #If in_GA == TRUE returns adjusted return_to_risk only, if FALSE, it  returns 
+  #Performance details.
+  if (in_GA) {return(return_to_risk)}
+  else {
+  return(list("return" = y_P_return, 
+              "risk" = y_P_risk, 
+              "fitness" = return_to_risk))
+  }
+}
+```
+
+### Function to create a GA instance capable of searching and finding a near-optimal set of weights for a list of assets and a time period.
+This Genetic Algorithm will search for the vector of portfolio weights (real numbers between 0 and 1) that maximizes the fitness function. The weight normalization is executed inside the fitness function.
+It worked well using default parameters, so I did not modify them.
+```{r}
+create_GA <- function(asset_list, time_string, max_i, pop_size) {
+  this_matrices <- build_matrices(asset_list,time_string)
+  P_GA <- ga(type="real-valued", nBits = 10, maxiter = max_i,
+             fitness = function(w_vector) 
+              fast_portfolio_eval(w_vector, this_matrices, in_GA=TRUE),
+             lower = c(0,0,0,0,0,0,0,0,0,0),
+             upper = c(1,1,1,1,1,1,1,1,1,1),
+             popSize = pop_size)
+  
+  return(P_GA)
+}
+```
+
+### Construction of a portfolio using the GA package:
+```{r first plot, echo=TRUE, fig.show=TRUE, message=TRUE, warning=FALSE, results=TRUE, include = TRUE, cache = TRUE}
+test_GA <- create_GA(my_Assets, "2018-12-31/2020-01-01", 1500, 300)
+plot(test_GA)
+```
+
+We can see that it learns very well, improving the best risk/return ratio from less than 3.5 (the best of the random 300 portfolios on the initial population) to around 4.5, with the best fitness level stabilizing around generation 1000.
+
+### Comparison of the evolved portfolio with balanced and random portfolios
+Now we will compare the evolved portfolio against a balanced portfolio (all weights equal), a classic "50/50" portfolio (half stock, half bonds) and a lot of random portfolios.
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+#Function that evaluates and plot np randomly weighted portfolios from a list of assets, and a custom portfolio list, for a time period.
+plot_rnd_portfolios <- function(asset_list, time_string, np, custom_w, color_list, custom_w_names, title)
+{
+  this_matrices <- build_matrices(asset_list, time_string)#gets return and risk data
+  
+  #generate random weights set
+  nc <- NCOL(this_matrices$price_matrix)
+  weight_set <- c()
+  for (i in 1:np) 
+  {
+    wi <- runif(nc)
+    wi <- wi / sum(wi)
+    weight_set <- rbind(weight_set,wi)
+  }
+
+  #evaluate random portfolios
+  x_risk <- c()
+  y_ret <- c()
+  for (w in 1:nrow(weight_set)) {
+    perf <- fast_portfolio_eval(weight_set[w,], this_matrices, in_GA=FALSE)
+    x_risk <- c(x_risk,perf$risk)
+    y_ret  <- c(y_ret, perf$return)
+  }
+  max_ret <- max(y_ret)+0.2
+  max_risk <- max(x_risk)+0.01
+  
+  #plot random portfolios
+  plot(x_risk, y_ret,  pch=20, xlim=c(0,max_risk), ylim=c(0,max_ret), main=title)
+  
+  #evaluate, plot custom portfolios and save performance information
+  performance_data <- data.frame()
+  this_ind <-1
+  for (w in custom_w) 
+    {
+    perf <- fast_portfolio_eval(w, this_matrices, in_GA=FALSE)
+    this_risk <- perf$risk
+    this_ret  <- perf$return
+    this_ratio = perf$fitness
+    this_color <- color_list[this_ind]
+    points(this_risk, this_ret, pch = 8, col = this_color, lwd = 2)
+    this_row <- c(custom_w_names[this_ind], this_ret, this_risk, this_ratio, this_color)
+    performance_data <- rbind(performance_data, this_row)
+    this_ind <- this_ind +1
+  }
+  
+    legend("topleft", title = "Portfolios", legend = c(custom_w_names),  fill= c(color_list), horiz=FALSE, cex=0.8)
+  
+  
+  names(performance_data) <- c("Portfolio", "Return", "Risk", "R_Ratio", "Color")
+  
+  return(performance_data)
+}
+```
+These are the benchmark portfolios:
+```{r}
+#create standard reference portfolios
+w50_USA <- c(0, 0, 0.5 ,0 ,0 ,0 ,0.5, 0, 0, 0) #50/50 portfolio (USA)
+w50_WORLD <- c(0.5, 0, 0 ,0 ,0 ,0 ,0, 0.5, 0, 0) #50/50 portfolio (World)
+weq <- c(1,1,1,1,1,1,1,1,1,1) / 10 #equal weights
+evolved <- c(test_GA@solution/sum(test_GA@solution))
+
+```
+
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+reference_portfolios <- list(w50_USA ,w50_WORLD, weq , c(evolved))
+reference_portfolios_names <- list("w50_USA" ,"w50_WORLD", "Equal Weights" , "Evolved")
+
+#color list for graph
+color_list <- c('red', 'blue', 'green', 'orange', 'yellow', 'darkorchid')
+
+#time string variables to make them easier to call
+y2019 <- "2018-12-31/2020-01-01"
+y2020 <- "2019-12-31/2021-01-01"
+y2021 <- "2020-12-31/2022-01-01"
+```
+
+The graph:  
+```{r, echo=FALSE}
+reference_portfolios <- list(w50_USA ,w50_WORLD, weq , c(evolved))
+reference_portfolios_names <- list("w50_USA" ,"w50_WORLD", "Equal Weights" , "Evolved")
+this_performance <- plot_rnd_portfolios(my_Assets, y2019, 700, reference_portfolios, color_list, reference_portfolios_names, '2019')
+
+```
+  
+We can appreciate that the evolved portfolio has a very low volatility, while the w50_USA portfolio seems to dominate most of the random portfolios. Weq portfolio stands in the middle of the random cloud, which makes sense!  
+Lastly, w50_WORLD also has a mediocre return/risk profile, lying in the middle of the random portfolio cloud.   
+We can compare the return to risk ratio for the portfolios in 2019:
+```{r, echo=FALSE}
+this_performance
+```
+The Evolved portfolio has a return to risk value substantially bigger than the w50_USA portfolio. So, if the investor wished for a more risky portfolio, should they choose w50_USA?
+It seems that using return to risk ratio as a fitness function tends to favor low risk portfolios (The limit of return to risk ratio, when risk tends to zero, is infinite!).
+To understand more deeply the risk-return trade off, we will build the efficient frontier for this asset list and time period. For this, we will create a modified genetic algorithm and a new fitness function, to find the best return for a given maximum level of risk constraint.
+
+```{r}
+#fitness function that returns the return for the specified portfolio and time period,
+#but heavily penalized if it exceeds the maximum risk level.
+
+fast_portfolio_eval_max_risk <- function(w_vector, this_matrices, in_GA=TRUE, max_risk) 
+{
+  w_vector <- w_vector /sum(w_vector) #normalize portfolio weights
+  
+  price_m <- this_matrices$price_matrix
+  d_ret_m <- this_matrices$daily_return_matrix
+  y_ret_m <- this_matrices$yearly_return_matrix
+  
+  cov_m <- cov(d_ret_m)
+  
+  #Evaluate Portfolio Performance
+  n_days = 252
+  
+  #Risk
+  d_P_risk <- t(w_vector) %*% cov_m %*% w_vector #daily variance
+  y_P_risk <- ((1 + d_P_risk)^n_days)-1 #annualized variance
+  y_P_risk <- sqrt(y_P_risk) #annualized standard deviation
+  
+  #Yearly Return
+  y_P_return <- sum(w_vector * y_ret_m)
+  
+  #Return to Risk Ratio
+  return_to_risk <- y_P_return / y_P_risk
+  
+  #penalty
+  excess_risk <- min(0, max_risk - y_P_risk)
+  penalty <- 10000 * excess_risk
+  
+  #fitness value
+  fitness <- y_P_return + penalty
+  
+  #If in_GA == TRUE returns fitness value only, if FALSE, it  returns Performance details.
+  if (in_GA) {return(fitness)}
+  else {
+  return(list("return" = y_P_return, 
+              "risk" = y_P_risk, 
+              "rr_ratio" = return_to_risk, 
+              "fitness" = fitness))
+  }
+}
+
+create_GA_max_risk <- function(asset_list, time_string, max_i, pop_size, max_risk) {
+  this_matrices <- build_matrices(asset_list,time_string)
+  P_GA <- ga(type="real-valued", nBits = 10, maxiter = max_i,
+             fitness = function(w_vector) 
+               fast_portfolio_eval_max_risk(w_vector, this_matrices, in_GA=TRUE, max_risk),
+             lower = c(0,0,0,0,0,0,0,0,0,0),
+             upper = c(1,1,1,1,1,1,1,1,1,1),
+             popSize = pop_size)
+  return(P_GA)
+}
+```
+
+
+```{r, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+#function that plots np points on the (heuristic) efficient frontier, from lower_sd to upper_sd risk range
+plot_efficient_frontier <- function(asset_list, time_string, lower_sd=0.03, upper_sd=0.11, increment=0.01, max_iter=500, popul=300)
+{
+  this_matrices <- build_matrices(asset_list, time_string)#gets return and risk data
+  efic_front <- data.frame()
+  
+  for(r in seq(from = lower_sd, to = upper_sd, by = increment)) {
+    mr_GA <- create_GA_max_risk(asset_list, time_string, max_iter, popul, r)
+    this_evo_w <- c(mr_GA@solution/sum(mr_GA@solution))
+    perf <- fast_portfolio_eval (this_evo_w, this_matrices, in_GA=FALSE)
+    
+    this_risk <- perf$risk
+    this_ret  <- perf$return
+    this_ratio = perf$fitness
+    
+    this_row <- c(r, this_ret, this_risk, this_ratio, this_evo_w)
+    efic_front <- rbind(efic_front,this_row)
+    
+  }
+  names(efic_front) <- c("Max_Risk", "Return", "Risk", "R_Ratio", "Portfolio")
+  return (efic_front)
+}
+
+#Plot function: Now with pareto front!
+plot_rnd_portfolios_pareto <- function(asset_list, time_string, np, custom_w, color_list, custom_w_names, title)
+{
+  this_matrices <- build_matrices(asset_list, time_string)#gets return and risk data
+  
+  #generate random weights set
+  nc <- NCOL(this_matrices$price_matrix)
+  weight_set <- c()
+  for (i in 1:np) 
+  {
+    wi <- runif(nc)
+    wi <- wi / sum(wi)
+    weight_set <- rbind(weight_set,wi)
+  }
+
+  #evaluate random portfolios
+  x_risk <- c()
+  y_ret <- c()
+  for (w in 1:nrow(weight_set)) {
+    perf <- fast_portfolio_eval(weight_set[w,], this_matrices, in_GA=FALSE)
+    x_risk <- c(x_risk,perf$risk)
+    y_ret  <- c(y_ret, perf$return)
+  }
+  max_ret <- max(y_ret)+0.2
+  max_risk <- max(x_risk)+0.01
+  
+  #plot random portfolios
+  plot(x_risk, y_ret,  pch=20, xlim=c(0,max_risk), ylim=c(0,max_ret), main=title)
+  
+  #evaluate, plot custom portfolios and save performance information
+  performance_data <- data.frame()
+  this_ind <-1
+  for (w in custom_w) 
+    {
+    perf <- fast_portfolio_eval(w, this_matrices, in_GA=FALSE)
+    this_risk <- perf$risk
+    this_ret  <- perf$return
+    this_ratio = perf$fitness
+    this_color <- color_list[this_ind]
+    points(this_risk, this_ret, pch = 8, col = this_color, lwd = 2)
+    this_row <- c(custom_w_names[this_ind], this_ret, this_risk, this_ratio, this_color)
+    performance_data <- rbind(performance_data, this_row)
+    this_ind <- this_ind +1
+  }
+  
+    legend("top", title = "Portfolios", legend = c(custom_w_names),  fill= c('red', 'blue', 'green', 'orange'), horiz=TRUE, cex=0.8)
+    legend("bottomleft", title = "Portfolios", legend = c("Random", "Pareto Front"),  fill= c('black', 'darkorchid'), horiz=FALSE, cex=0.8)
+  
+  names(performance_data) <- c("Portfolio", "Return", "Risk", "R_Ratio", "Color")
+  
+  eff <- plot_efficient_frontier(asset_list, time_string, lower_sd=0.03, upper_sd=0.11, increment=0.02, max_iter=1500, popul=200)
+  lines(eff$Risk,eff$Return, col='darkorchid')
+  
+  return(list("performance_data" = performance_data, "pareto_front" = eff))
+}
+```
+Let's see it in action:
+
+```{r, echo=FALSE}
+reference_portfolios <- list(w50_USA ,w50_WORLD, weq , c(evolved))
+reference_portfolios_names <- list("w50_USA" ,"w50_WORLD", "Equal Weights" , "Evolved")
+
+this_performance <- plot_rnd_portfolios_pareto(my_Assets, "2018-12-31/2020-01-01", 500, reference_portfolios, color_list, reference_portfolios_names, 'Pareto front 2019')
+```
+  
+Excellent! Now it is much easier to visually evaluate the portfolios. Even though the efficient_frontier_building_GA was given 1500 generations to evolve (the same as the original portfolio optimizer) it has not been able to match the evolved portfolio performance, which lies a little out of our heuristic Pareto front (although it clearly dominates all 500 random generated portfolios!).
+We can also verify that the w50_USA portfolio is in fact on the efficient frontier for this asset list and time period.  
+The best advantage of building the efficient frontier is that we can devolve the decision power to the investor, who can now choose the risk s/he wants to take while making an almost-optimal portfolio allocation.
+
+Pareto Front points:
+```{r, echo=FALSE}
+print(this_performance$pareto_front[1:4])
+```
+Portfolio compositions for the efficient frontier points:
+```{r, echo=FALSE}
+eff_port <- this_performance$pareto_front[5:14]
+colnames(eff_port) <- my_Assets
+print(round(eff_port, digits = 3))
+```
+For 2019 (and this asset pool), it seems VOO was the most efficient asset to increase returns, as we can see that its allocation is consistently increasing as we allow more risk into the portfolio (up to over 75% of the portfolio when we allow standard deviation to increase to 11%)
+
+### Evaluation of the portfolio on unseen "future" data
+Now we will compare the performance of the portfolios on future, unseen price data. For this, we will calculate the evolved portfolios for 2019, 2020 and 2021, and compare their performance on its trained and future years, also comparing them with the reference portfolios:
+
+```{r, echo = FALSE}
+#pipeline for modelling and evaluating 2019-2021
+years <- c(y2019,y2020,y2021)
+
+#calculate optimum portfolio for each year
+n_iter <- 1000
+n_pop <- 300
+
+p2019 <- test_GA
+p2020 <- create_GA(my_Assets, y2020, n_iter, n_pop)
+p2021 <- create_GA(my_Assets, y2021, n_iter, n_pop)
+
+#store portfolio weights
+w2019 <- c(p2019@solution / sum(p2019@solution))
+w2020 <- c(p2020@solution / sum(p2020@solution))
+w2021 <- c(p2021@solution / sum(p2021@solution))
+```
+
+
+```{r, echo = FALSE}
+#evaluate and plot portfolios into future years
+reference_portfolios <- list(w50_USA , w50_WORLD, weq, w2019, w2020, w2021)
+reference_portfolios_names <- list("w50_USA" , "w50_WORLD", "Equally Weighted", "evo2019", "evo2020", "evo2021")
+
+this_performance2019 <- plot_rnd_portfolios(my_Assets, y2019, 500, reference_portfolios[1:4], color_list, reference_portfolios_names[1:4], '2019')
+```
+```{r }
+this_performance2019
+```
+
+
+```{r, echo = FALSE}
+this_performance2020 <- plot_rnd_portfolios(my_Assets, y2020, 500, reference_portfolios[1:5], color_list, reference_portfolios_names[1:5], '2020')
+```
+```{r}
+this_performance2020
+```
+
+
+
+```{r, echo = FALSE}
+this_performance2021 <- plot_rnd_portfolios(my_Assets, y2021, 500, reference_portfolios[1:6], color_list, reference_portfolios_names[1:6], '2021')
+```
+```{r}
+this_performance2021
+```
+This is the summary performance of evo2019 portfolio for 2019, 2020 and 2021:  
+```{r echo = FALSE}
+evo2019_summary <- rbind(this_performance2019[4,],this_performance2020[4,],this_performance2021[4,])
+rownames(evo2019_summary)<-c(2019,2020, 2021)
+evo2019_summary
+```
+After analyzing the performance of the portfolios for 2019, 2020 and 2021, it is easy to conclude that the evolved portfolios did not perform well on subsequent years. On the table above we can observe that the return/risk ratio for evo2019 drops from 4.53 in 2019 (the year it trained on) to 0.86 in 2020.  
+evo2020 did even worse! in 2021 it returned -6%, even bellow all random portfolios. It even 'fell off the chart'! (for charting consistency, I kept 0 as the lower limit for return).
+It is interesting to note the performance of w50_USA: It performed well in 2019 and 2021, and its performance was middle of the pack in 2020. Maybe there is some wisdom in those investors proclaiming the goods of the 50/50 portfolio.  
+
+One of the foundations of the portfolio theory is that while returns will vary, co-variances are more stable and structural. This last 3 years have shown none of that. Maybe this 2022 will be more "normal"? It is hard to say with a never ending pandemic, the threat of war in Europe, and most governments heavily indebted.  
+
+The capacity of the Genetic Algorithm to find near-optimal portfolios is amazing, and this is a tool that I will certainly be using for my own investments. The most important adjustment for "real life" use will be to shorten the time periods. My next step (after submitting this assignment) will be to try monthly optimization and investigate the performance of evolved portfolios over the following months.
+
+
+## Part 2: Using GAs to select the assets
+Selecting 10 assets from a pool of 50 in order to feed them to the portfolio optimizing GA.
+
+### Define 50 asset list and get the data
+```{r}
+fiftyAssets <- c("VT", "EMXC", "VOO", "VGK", "MCHI", "VPL", "BND", "PFUIX", 
+                 "PDBC", "GLD", "AAPL", "AGG", "AMD","BLK", "ECH", "ENZL",
+                 "EWU", "EWZ", "F", "FB", "MRK", "GM", "GOOG", "ILF", "IZRL",
+                 "MA", "MSFT", "NKE", "NVDA", "PHDG", "PG", "SLV", "XOM",
+                 "TSLA", "TSM", "V", "VNQ", "VNQI", "VSGX", "AMZN", "PYPL",
+                 "NFLX", "BABA", "JNJ", "CVX", "SQ", "BA", "JPM", "DIS", "BAC")
+
+fiftyAssets <- sort(fiftyAssets)
+```
+
+### Get data for this assets
+```{r echo = FALSE, message=FALSE, warning=FALSE, cache = TRUE}
+getSymbols(fiftyAssets, from="2018-12-31")
+```
+
+### Function to retrieve a list of assets from  a binary vector and a list of asset names
+```{r}
+get_assets_b <- function(w_vector, big_list)
+{
+  select_list = list() 
+  for (a in 1:length(w_vector))
+  {
+    if (w_vector[a]==1) { select_list <- append(select_list,big_list[a]) }
+  }
+  return (select_list)
+}
+```
+
+### Fitness function for selecting assets
+This function rewards return/risk ratio, but heavily penalizes the portfolio if there are more (or less) than 10 assets active.
+The asset vector contains 50 positions, where a 1 represent an asset used in the portfolio, and a zero represents unused assets. This function assumes equally weighted portfolios.
+
+```{r}
+bit_portfolio_eval <- function(w_vector, big_list, time_string, in_GA)
+{
+  mini_vector <- c(1,1,1,1,1,1,1,1,1,1) #equal weighting for this stage
+  mini_vector <- mini_vector /sum(mini_vector) #normalize portfolio weights
+  
+  penalty <- (2 * (sum(w_vector)-10)^2) 
+  #Zero penalty if there are exactly 10 assets active in the portfolio
+  
+  #if there are more or less than 10 assets, do not waste time calculating matrices!
+  if (sum(w_vector) != 10) {return (-penalty)}
+  
+  #Build data matrices  
+  asset_list <- get_assets_b(w_vector, big_list)
+  this_matrices <- build_matrices(asset_list,time_string)
+  
+  price_m <- this_matrices$price_matrix
+  d_ret_m <- this_matrices$daily_return_matrix
+  y_ret_m <- this_matrices$yearly_return_matrix
+  
+  cov_m <- cov(d_ret_m)
+  
+  #Evaluate Portfolio Performance
+  n_days = 252
+  
+  #Risk
+  d_P_risk <- t(mini_vector) %*% cov_m %*% mini_vector #daily
+  y_P_risk <- ((1 + d_P_risk)^n_days)-1 #annualize
+  y_P_risk <- sqrt(y_P_risk) #annualized standard deviation
+  
+  #Return
+  y_P_return <- sum(mini_vector * y_ret_m)
+  
+  #Return to Risk Ratio
+  return_to_risk <- y_P_return / y_P_risk
+  
+  #Performance adjusted by penalty if incorrect number of assets in the portfolio
+  adj_fitness <- return_to_risk - penalty
+  
+  #If in_GA == TRUE returns adjusted fitness only, 
+  #if FALSE return Performance details
+  if (in_GA) {return(adj_fitness)}
+  else {
+  return(list("time" = time_string, 
+              "return" = y_P_return, 
+              "risk" = y_P_risk, 
+              "fitness" = adj_fitness))
+  }
+}
+```
+
+### Function to create GA that can select the best 10 assets combination out of the total 50 available.
+We continue using year 2019 as the time frame to measure performance and select the assets.
+The method I devised consists in searching for the best equally weighted, 10 assets portfolio.
+As explained previously, the performance is measured by Return to Risk ratio, adjusted by a penalty for not having the correct number of assets.
+On the first trials, the algorithm performed well, but wasted many generations trying to figure out the correct number of assets required, so in this version it is suggested with random portfolios that will have around 10 assets in them. This way the learning is improved considerably.
+```{r}
+#create Genetic algorithm instance:
+create_bit_GA <- function(big_list, time_string, max_i, pop_size, in_GA=TRUE) {
+  P_GA <- ga(type="binary",
+             nBits = 50,
+             maxiter = max_i,
+             fitness = function(w_vector) 
+               bit_portfolio_eval(w_vector, big_list, time_string, in_GA),
+             popSize = pop_size,
+             suggestions = create_rnd_port(pop_size,50,10)
+             )
+  
+  plot(P_GA)
+  return(P_GA)
+}
+
+
+#function that create n_samples of random portfolios with around 10 
+#active assets, to initialize the GA in better terms
+
+create_rnd_port <- function(n_samples, vector_size, n_active)
+{
+  #creates n_samples of vectors size vector_size with approx n_active assets
+  this_matrix <- matrix(ncol=vector_size, nrow=0, byrow=TRUE)
+  prob <- n_active / vector_size
+  
+  for (s in 1:n_samples)
+  {
+      this_row <- c()
+      for (i in 1:vector_size)
+      {
+        this_rn <- runif(1)
+        if (this_rn <= prob) {a = 1}
+        else {a = 0}
+        this_row <- c(this_row, a)
+      }
+      this_matrix <- rbind(this_matrix,this_row)
+  }
+  return (this_matrix)
+}
+```
+
+### Using create_bit_GA to select the assets
+Running it for the official asset pool! The one that will go back to part one and try to beat the originally optimized portfolio (with assets selected by me without quantitative analysis). Previous trials showed very good convergence before 100 generations, so in this run the cpu power is being expended mostly on a big population.
+
+```{r cache=TRUE}
+official_GA <- create_bit_GA(fiftyAssets,"2018-12-31/2020-01-01",150,300,TRUE)
+```
+  
+The solution found consist of these assets:
+```{r, echo = FALSE}
+print(paste(get_assets_b(official_GA@solution,fiftyAssets)))
+```
+
+The performance:
+```{r, echo = FALSE}
+bit_portfolio_eval(official_GA@solution, fiftyAssets, "2018-12-31/2020-01-01", FALSE)
+```
+With 34% return and around 7% of volatility, this asset pool Looks promising, and already surpassed the return to risk ratio of the evo2019 portfolio.
+This list of assets will be fed to the original GA to find the best allocation (and potential) for this pool of assets.
+
+The criteria to asses the superiority of the GA selected pool of assets over the one that I handpicked will be, in first place, the return to risk ratio of the optimized portfolio, but much more interesting will be to asses the Pareto Frontier created by the original and **GA_selected** pools of assets!
+
+### Optimize weight vector for the GA selected assets.
+
+```{r, cache = TRUE}
+GA_selected_assets <- get_assets_b(official_GA@solution,fiftyAssets)
+GA_selected_GA <- create_GA(GA_selected_assets, y2019, 1500, 300)
+plot(GA_selected_GA)
+```
+  
+Impressive! The GA_selected assets lead to an optimized return/risk ratio of over 6, while my handpicked ones allowed for a humble 4.5.
+Now let us review and compare the efficient frontiers that both asset pools generate (Random portfolio points correspond to the **GA_selected** asset pool):
+
+```{r, echo = FALSE}
+
+w_GA_selected <- c(GA_selected_GA@solution/sum(GA_selected_GA@solution))
+
+
+#Plot function: Now with double pareto front!
+plot_rnd_portfolios_pareto_x2 <- function(asset_list, time_string, np, title)
+{
+  this_matrices <- build_matrices(asset_list, time_string)#gets return and risk data
+  
+  #generate random weights set
+  nc <- NCOL(this_matrices$price_matrix)
+  weight_set <- c()
+  for (i in 1:np) 
+  {
+    wi <- runif(nc)
+    wi <- wi / sum(wi)
+    weight_set <- rbind(weight_set,wi)
+  }
+
+  #evaluate random portfolios
+  x_risk <- c()
+  y_ret <- c()
+  for (w in 1:nrow(weight_set)) {
+    perf <- fast_portfolio_eval(weight_set[w,], this_matrices, in_GA=FALSE)
+    x_risk <- c(x_risk,perf$risk)
+    y_ret  <- c(y_ret, perf$return)
+  }
+  max_ret <- max(y_ret)+0.2
+  max_risk <- max(x_risk)+0.001
+  
+  #plot random portfolios
+  plot(x_risk, y_ret,  pch=20, xlim=c(0,max_risk), ylim=c(0,max_ret), main=title)
+  
+  #plot efficient frontiers
+  eff <- plot_efficient_frontier(my_Assets, time_string, lower_sd=0.03, upper_sd=0.11, increment=0.02, max_iter=1500, popul=200)
+  lines(eff$Risk,eff$Return, col='darkorchid')
+  
+  eff2 <- plot_efficient_frontier(GA_selected_assets, time_string, lower_sd=0.03, upper_sd=0.11, increment=0.02, max_iter=1500, popul=200)
+  lines(eff2$Risk,eff2$Return, col='cyan')
+  
+  legend("topleft", title = "Parento Fronts", legend = c('hand_picked_assets', 'GA_selected_assets'),  fill= c('darkorchid','cyan'), horiz=FALSE, cex=0.8)
+  
+  return(list("hand_picked" = eff, "GA_selected" = eff2))
+}
+```
+
+```{r, echo = FALSE, cache = TRUE}
+GA_performance <- plot_rnd_portfolios_pareto_x2(GA_selected_assets, y2019, 500, title = "2019: Pareto Front Comparison")
+```
+  
+A resounding success. The asset pool generated by the algorithm is so good that ALL of the random portfolios generated using it dominate the efficient frontier generated by the handpicked list of assets (And I thought it was so smart :-)  
+The Fitness function and Genetic Algorithm have really done an excellent job selecting assets. When first designing them of course I was not sure it would work, but I am really proud of the results.
+  
+Summary of Pareto Front for handpicked assets:  
+
+```{r, echo = FALSE}
+hp <- data.frame(GA_performance[1])
+print(hp[,1:4])
+```
+
+  
+Summary of Pareto Front for GA selected assets: 
+```{r, echo = FALSE}
+gp <- data.frame(GA_performance[2])
+print(gp[,1:4])
+
+```
+  
+  As stated before, next steps should be to improve the model into a monthly cycle and check whether those portfolios are able to perform well into the next time period. One way to implement this in real life could be to divide the investment money in (for example)  four sub-portfolios, each of them trained over one month, and kept alive for four. So that at any given time the total portfolio will be a moving average of the last 4 evolved portfolios.
+
+One last caveat that should be investigated, is, of course, whether or not the model is "overfitting" the data. I suspect that some constraints could be added to regularize it (Such as, for example, not permitting any of the assets to weight more than x% of the portfolio).  

@@ -1,0 +1,27 @@
+{
+    "id": "EDB79248",
+    "path": "D:/Strathclyde/CS971 Evolutionary computing for finance/Assignment 1/port_optimization_using_GA.R",
+    "project_path": "port_optimization_using_GA.R",
+    "type": "r_source",
+    "hash": "2371812705",
+    "contents": "",
+    "dirty": false,
+    "created": 1677184423754.0,
+    "source_on_save": false,
+    "relative_order": 3,
+    "properties": {
+        "tempName": "Untitled1",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "300,0",
+        "scrollLine": "284"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1677191506,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1677193031324,
+    "read_only": false,
+    "read_only_alternatives": []
+}
